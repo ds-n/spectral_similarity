@@ -53,47 +53,61 @@ def metrics_comparison(
     # Iterate through unique peptide IDs
     for i in set(peptides_predictions["ID"]):
         # Filter rows for the given ID
-        selected_peptide = peptides_predictions[peptides_predictions["ID"] == i]
+        selected_peptide = peptides_predictions[peptides_predictions["ID"] == i].copy()
         selected_peptide_switched = peptides_switch_predictions[
             peptides_switch_predictions["ID"] == i
-        ]
+        ].copy()
 
-        # Identify the first annotation in selected_peptide that is also in selected_peptide_switched
-        first_common_annotation = next(
-            (
-                ann
-                for ann in selected_peptide["annotation"]
-                if ann in set(selected_peptide_switched["annotation"])
-            ),
-            None,
+        # Find all common annotations between the two DataFrames
+        common_annotations = set(selected_peptide["annotation"]) & set(
+            selected_peptide_switched["annotation"]
         )
 
-        # If a common annotation exists, filter on it; otherwise, return empty structures
-        if first_common_annotation is not None:
-            selected_peptide = selected_peptide[
-                selected_peptide["annotation"] == first_common_annotation
-            ].copy()
-            selected_peptide_switched = selected_peptide_switched[
-                selected_peptide_switched["annotation"] == first_common_annotation
-            ].copy()
-            original_intensities = selected_peptide["intensities"].to_numpy()
-        else:
-            selected_peptide = selected_peptide.iloc[0:0].copy()
-            selected_peptide_switched = selected_peptide_switched.iloc[0:0].copy()
-            original_intensities = np.array([])
+        if len(common_annotations) == 0:
+            # No common annotations, skip this peptide
+            continue
+
+        # Sort common annotations to ensure consistent ordering
+        common_annotations_sorted = sorted(common_annotations)
+
+        # Filter both DataFrames to only include common annotations
+        selected_peptide = selected_peptide[
+            selected_peptide["annotation"].isin(common_annotations_sorted)
+        ].copy()
+        selected_peptide_switched = selected_peptide_switched[
+            selected_peptide_switched["annotation"].isin(common_annotations_sorted)
+        ].copy()
+
+        # Set annotation as index and reindex to align by common annotations
+        selected_peptide = selected_peptide.set_index("annotation").loc[
+            common_annotations_sorted
+        ]
+        selected_peptide_switched = selected_peptide_switched.set_index(
+            "annotation"
+        ).loc[common_annotations_sorted]
+
+        # Now both DataFrames are aligned by annotation order
+        original_intensities = selected_peptide["intensities"].to_numpy()
+        switched_intensities = selected_peptide_switched["intensities"].to_numpy()
+        mz_values = selected_peptide["mz"].to_numpy()
+        mz_values_switched = selected_peptide_switched["mz"].to_numpy()
+
+        # Get peptide sequence info (from the first row since they're all the same ID)
+        peptide_seq = selected_peptide["peptide_sequences"].iloc[0]
+        peptide_seq_switched = selected_peptide_switched["peptide_sequences"].iloc[0]
 
         for j in range(num_randomization_rounds):
             score_dict = {}
 
             # Maybe this should be renamed as these are not always noisy
-            noisy_intensities = selected_peptide["intensities"].to_numpy()
+            noisy_intensities = original_intensities.copy()
             if randomize_gaussian:
                 # Add Gaussian noise instead of swapping
                 noisy_intensities = add_gaussian_noise(
                     original_intensities, mean=noise_mean, std_dev=noise_std_dev
                 )
             if randomize_switched:
-                noisy_intensities = selected_peptide["intensities"].to_numpy()
+                noisy_intensities = original_intensities.copy()
                 for _ in range(num_randomizations):
                     noisy_intensities = swap_two(noisy_intensities)
             noisy_intensities = np.clip(noisy_intensities, 0, None)
@@ -101,11 +115,11 @@ def metrics_comparison(
             for key in metric_keys:
                 inp = {
                     "intensity1": noisy_intensities,
-                    "intensity2": selected_peptide_switched["intensities"].to_numpy(),
-                    "mz1": selected_peptide["mz"].to_numpy(),
-                    "mz2": selected_peptide_switched["mz"].to_numpy(),
+                    "intensity2": switched_intensities,
+                    "mz1": mz_values,
+                    "mz2": mz_values_switched,
                     "diagnostic_mz": np.array([]),
-                    "mz": selected_peptide["mz"].to_numpy(),
+                    "mz": mz_values,
                 }
 
                 try:
@@ -115,13 +129,12 @@ def metrics_comparison(
 
                 score_dict[key] = score
 
-            peptide_dict[
-                selected_peptide["peptide_sequences"].iloc[0]
-                + "|"
-                + selected_peptide_switched["peptide_sequences"].iloc[0]
-                + "|"
-                + str(j)
-            ] = score_dict
+            try:
+                peptide_dict[
+                    peptide_seq + "|" + peptide_seq_switched + "|" + str(j)
+                ] = score_dict
+            except Exception as e:
+                continue
 
     score_df = pd.DataFrame(peptide_dict).T
     return score_df
